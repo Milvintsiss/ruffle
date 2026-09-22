@@ -2,6 +2,7 @@
 
 use crate::context::UpdateContext;
 use crate::display_object::{DisplayObject, DisplayObjectWeak, TDisplayObject};
+use fnv::FnvHashSet;
 use gc_arena::{Collect, Mutation};
 use std::rc::Rc;
 
@@ -18,6 +19,11 @@ use std::rc::Rc;
 #[collect(no_drop)]
 pub struct OrphanManager<'gc> {
     orphans: Rc<Vec<DisplayObjectWeak<'gc>>>,
+    /// Addresses of the objects currently in `orphans`, so that `add_orphan_obj`
+    /// does not have to scan the whole list (it is called for every MovieClip
+    /// removed from its parent by script). Rebuilt by `cleanup_dead_orphans`.
+    #[collect(require_static)]
+    listed: FnvHashSet<usize>,
 }
 
 impl<'gc> OrphanManager<'gc> {
@@ -33,11 +39,7 @@ impl<'gc> OrphanManager<'gc> {
     pub fn add_orphan_obj(&mut self, dobj: DisplayObject<'gc>) {
         // Note: comparing pointers is correct because GcWeak keeps its allocation alive,
         // so the pointers can't overlap by accident.
-        if self
-            .orphans
-            .iter()
-            .all(|d| !std::ptr::eq(d.as_ptr(), dobj.as_ptr()))
-        {
+        if self.listed.insert(dobj.as_ptr() as usize) {
             self.orphans_mut().push(dobj.downgrade());
         }
     }
@@ -90,6 +92,9 @@ impl<'gc> OrphanManager<'gc> {
                 false
             }
         });
+        self.listed.clear();
+        self.listed
+            .extend(self.orphans.iter().map(|d| d.as_ptr() as usize));
     }
 }
 
@@ -97,6 +102,7 @@ impl<'gc> Default for OrphanManager<'gc> {
     fn default() -> Self {
         Self {
             orphans: Rc::new(Vec::new()),
+            listed: FnvHashSet::default(),
         }
     }
 }
