@@ -134,7 +134,6 @@ pub fn run_inner_goto_frame<'gc>(
         return;
     }
 
-    let stage = context.stage;
     let old_phase = *context.frame_phase;
 
     // When performing goto, frame scripts behave the same as when entering a new frame
@@ -143,18 +142,18 @@ pub fn run_inner_goto_frame<'gc>(
 
     // Note - we do *not* call `enter_frame` or dispatch an `enterFrame` event
 
+    // Local goto (perf-lab/ruffle-patches/0003): the goto only changed the timeline of
+    // `initial_clip`, so the construct and frame-script passes run on its subtree instead
+    // of the whole stage and every orphan (two full passes per explicit goto, 2 to 3 ms each
+    // with ~2 000 orphans). Children placed by other clips' own timelines this frame and
+    // their queued frame scripts are handled by the normal phases of the same frame instead
+    // of early.
     *context.frame_phase = FramePhase::Construct;
-    OrphanManager::each_orphan_obj(context, |orphan, context| {
-        orphan.construct_frame(context);
-    });
-    stage.construct_frame(context);
+    initial_clip.construct_frame(context);
     broadcast_frame_constructed(context);
 
     *context.frame_phase = FramePhase::FrameScripts;
-    stage.run_frame_scripts(context);
-    OrphanManager::each_orphan_obj(context, |orphan, context| {
-        orphan.run_frame_scripts(context);
-    });
+    initial_clip.run_frame_scripts(context);
 
     for child in removed_frame_scripts {
         child.run_frame_scripts(context);
