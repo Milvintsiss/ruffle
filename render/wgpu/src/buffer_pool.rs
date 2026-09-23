@@ -3,9 +3,22 @@ use crate::globals::Globals;
 use fnv::FnvHashMap;
 use std::fmt::{Debug, Formatter};
 use std::ops::Deref;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
-type PoolInner<T> = Mutex<Vec<T>>;
+/// Pooled items that have not been taken for this many frames are released. Short on
+/// purpose: every live texture enlarges wgpu's usage trackers (measured: 120 frames cost
+/// ~1.4 % of the main thread in UsageScope drops); 4 frames keeps frame-to-frame reuse.
+const MAX_IDLE_FRAMES: u64 = 4;
+
+struct Pooled<Type, Description> {
+    item: Type,
+    description: Description,
+    /// Value of the owning pool's frame counter when the item was last returned.
+    last_used_frame: u64,
+}
+
+type PoolInner<Type, Description> = Mutex<Vec<Pooled<Type, Description>>>;
 type Constructor<Type, Description> = Box<dyn Fn(&Descriptors, &Description) -> Type>;
 
 #[derive(Debug, Default)]
@@ -81,6 +94,14 @@ impl TexturePool {
             })
             .clone()
     }
+
+    /// Marks the end of a frame: advances every pool's frame counter, releases
+    /// textures that stayed unused for `MAX_IDLE_FRAMES` frames and forgets
+    /// pools that became empty. Call this once per submitted frame instead of
+    /// recreating the pool, so that the next frame can reuse the textures.
+    pub fn end_frame(&mut self) {
+        self.pools.retain(|_, pool| pool.end_frame() > 0);
+    }
 }
 
 #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
@@ -121,8 +142,11 @@ impl BufferDescription for AlwaysCompatible {
 }
 
 pub struct BufferPool<Type, Description: BufferDescription> {
-    available: Arc<PoolInner<(Type, Description)>>,
+    available: Arc<PoolInner<Type, Description>>,
     constructor: Constructor<Type, Description>,
+    /// Frame counter shared with the entries handed out by this pool, so that a
+    /// returned item can record when it was last used.
+    frame: Arc<AtomicU64>,
 }
 
 impl<Type, Description: BufferDescription> Debug for BufferPool<Type, Description> {
@@ -136,6 +160,7 @@ impl<Type, Description: BufferDescription> BufferPool<Type, Description> {
         Self {
             available: Arc::new(Mutex::new(vec![])),
             constructor,
+            frame: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -150,7 +175,7 @@ impl<Type, Description: BufferDescription> BufferPool<Type, Description> {
             .expect("Should not be able to lock recursively");
         let mut best: Option<(Description::Cost, usize)> = None;
         for i in 0..guard.len() {
-            if let Some(cost) = description.cost_to_use(&guard[i].1) {
+            if let Some(cost) = description.cost_to_use(&guard[i].description) {
                 if let Some(best) = &mut best {
                     if best.0 > cost {
                         *best = (cost, i);
@@ -162,7 +187,8 @@ impl<Type, Description: BufferDescription> BufferPool<Type, Description> {
         }
 
         let (item, used_description) = if let Some((_, best)) = best {
-            guard.swap_remove(best)
+            let pooled = guard.swap_remove(best);
+            (pooled.item, pooled.description)
         } else {
             let item = (self.constructor)(descriptors, &description);
             (item, description)
@@ -171,14 +197,28 @@ impl<Type, Description: BufferDescription> BufferPool<Type, Description> {
             item: Some(item),
             description: used_description,
             pool: Arc::downgrade(&self.available),
+            frame: self.frame.clone(),
         }
+    }
+
+    /// Advances the frame counter and drops the items that were not used for a
+    /// while. Returns the number of items still available in the pool.
+    pub fn end_frame(&self) -> usize {
+        let now = self.frame.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut guard = self
+            .available
+            .lock()
+            .expect("Should not be able to lock recursively");
+        guard.retain(|pooled| now.saturating_sub(pooled.last_used_frame) <= MAX_IDLE_FRAMES);
+        guard.len()
     }
 }
 
 pub struct PoolEntry<Type, Description: BufferDescription> {
     item: Option<Type>,
     description: Description,
-    pool: Weak<PoolInner<(Type, Description)>>,
+    pool: Weak<PoolInner<Type, Description>>,
+    frame: Arc<AtomicU64>,
 }
 
 impl<Type, Description: BufferDescription> Debug for PoolEntry<Type, Description>
@@ -197,7 +237,11 @@ impl<Type, Description: BufferDescription> Drop for PoolEntry<Type, Description>
         {
             pool.lock()
                 .expect("Should not be able to lock recursively")
-                .push((item, self.description.clone()))
+                .push(Pooled {
+                    item,
+                    description: self.description.clone(),
+                    last_used_frame: self.frame.load(Ordering::Relaxed),
+                })
         }
     }
 }

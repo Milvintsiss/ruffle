@@ -631,7 +631,12 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
 
         self.active_frame
             .submit_for_target(&self.descriptors, &self.target, frame_output);
-        self.offscreen_texture_pool = TexturePool::new();
+        // Keep the pooled offscreen textures alive across frames so the next frame's
+        // filter / cacheAsBitmap / blend renders reuse them instead of reallocating
+        // (hundreds of textures per second on filter-heavy content). Textures that
+        // stay unused for a while are released by `TexturePool::end_frame`.
+        self.offscreen_texture_pool.end_frame();
+        self.texture_pool.end_frame();
     }
 
     #[instrument(level = "debug", skip_all)]
