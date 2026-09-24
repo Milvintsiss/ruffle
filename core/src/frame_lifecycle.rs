@@ -181,7 +181,7 @@ pub fn run_inner_goto_frame<'gc>(
 /// Orphans of animation-heavy content are mostly empty, stopped clips for which the three
 /// frame passes do nothing (perf-lab/ruffle-patches/0004). The check runs before each pass,
 /// so a clip woken up by script in between (goto, play, addChild...) is processed normally.
-fn is_idle_orphan(orphan: DisplayObject<'_>) -> bool {
+pub(crate) fn is_idle_orphan(orphan: DisplayObject<'_>) -> bool {
     orphan.as_movie_clip().is_some_and(|mc| mc.is_idle_leaf())
 }
 
