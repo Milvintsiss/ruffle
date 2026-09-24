@@ -829,11 +829,16 @@ impl<'gc> MovieClip<'gc> {
     /// object already constructed, no loop queued, no frame script pending or due on the
     /// current frame (perf-lab/ruffle-patches/0004). Re-check it before each frame pass.
     pub fn is_idle_leaf(self) -> bool {
+        self.num_children() == 0 && self.is_idle_node()
+    }
+
+    /// The same conditions without the one on children: the three frame passes do nothing for
+    /// this clip itself and only recurse into its children (perf-lab/ruffle-patches/0006).
+    pub fn is_idle_node(self) -> bool {
         self.0.object2.get().is_some()
             && !self.0.playing()
             && !self.0.loop_queued()
             && !self.has_pending_script()
-            && self.num_children() == 0
             && !self.base().should_skip_next_enter_frame()
             && self.0.queued_tags.borrow().is_empty()
             && !self.has_frame_script(self.0.current_frame.get())

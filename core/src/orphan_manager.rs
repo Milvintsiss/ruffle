@@ -2,7 +2,7 @@
 
 use crate::context::UpdateContext;
 use crate::display_object::{DisplayObject, DisplayObjectWeak, TDisplayObject};
-use crate::frame_lifecycle::is_idle_orphan;
+use crate::frame_lifecycle::{is_idle_tree, set_tree_asleep};
 use fnv::FnvHashSet;
 use gc_arena::{Collect, Mutation};
 use std::cell::RefCell;
@@ -158,15 +158,19 @@ impl<'gc> OrphanManager<'gc> {
                 // any orphan we see that has 'placed_by_avm2_script()' should stay on the orphan
                 // list, because it was not removed by a RemoveObject tag.
                 let keep = dobj.placed_by_avm2_script();
-                // perf-lab 0005: an idle orphan falls asleep until something wakes it.
-                let idle = keep && is_idle_orphan(dobj);
+                // perf-lab 0005: an idle orphan falls asleep until something wakes it; 0006: the
+                // same for a clip whose whole tree is idle, every object of the tree being marked.
+                let idle = keep && dobj.as_movie_clip().is_some() && is_idle_tree(dobj);
                 e.asleep = idle;
-                dobj.base().set_orphan_asleep(idle);
-                keep
-            } else {
-                if let Some(dobj) = e.obj.upgrade(mc) {
+                if idle {
+                    set_tree_asleep(dobj);
+                } else {
                     dobj.base().set_orphan_asleep(false);
                 }
+                keep
+            } else {
+                // Dead, or inside another tree now: its flag may stay set, which can only cause
+                // an extra wake-up (never a missed one).
                 false
             }
         });
