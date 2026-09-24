@@ -704,6 +704,18 @@ impl<'gc> DisplayObjectBase<'gc> {
             // The base is the first field of every display object (`HasPrefixField`), so its
             // address is the one `DisplayObjectWeak::as_ptr` gives for the orphan list.
             crate::orphan_manager::queue_orphan_wake(self as *const Self as usize);
+            // perf-lab/ruffle-patches/0006: every object of an asleep orphan tree carries the
+            // flag, so a change anywhere in the tree wakes it up to its root.
+            let mut parent = self.parent();
+            while let Some(p) = parent {
+                let base = p.base();
+                if !base.contains_flag(DisplayObjectFlags::ORPHAN_ASLEEP) {
+                    break;
+                }
+                base.set_flag(DisplayObjectFlags::ORPHAN_ASLEEP, false);
+                crate::orphan_manager::queue_orphan_wake(p.as_ptr() as usize);
+                parent = base.parent();
+            }
         }
     }
 
