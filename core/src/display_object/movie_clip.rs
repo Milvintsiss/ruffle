@@ -841,6 +841,9 @@ impl<'gc> MovieClip<'gc> {
     }
 
     pub fn set_has_pending_script(self, value: bool) {
+        if value {
+            self.0.wake_orphan();
+        }
         self.0.has_pending_script.set(value);
     }
 
@@ -1159,6 +1162,7 @@ impl<'gc> MovieClip<'gc> {
 
     /// This sets the current frame of this MovieClip to a given number.
     pub fn set_current_frame(self, current_frame: FrameNumber) {
+        self.0.wake_orphan();
         self.0.current_frame.set(current_frame);
     }
 
@@ -1680,6 +1684,7 @@ impl<'gc> MovieClip<'gc> {
             // when rewinding. We don't actually remove children yet because
             // otherwise AS3 can observe byproducts of the rewinding process.
             self.0.tag_stream_pos.set(0);
+            self.0.wake_orphan();
             self.0.current_frame.set(0);
 
             true
@@ -1809,6 +1814,7 @@ impl<'gc> MovieClip<'gc> {
                     tag_type: QueuedTagAction::Place(params.version),
                     tag_start: params.tag_start,
                 };
+                self.0.wake_orphan();
                 let mut queued_tags = self.0.queued_tags.borrow_mut();
                 let bucket = queued_tags
                     .entry(params.place_object.depth as Depth)
@@ -1884,6 +1890,7 @@ impl<'gc> MovieClip<'gc> {
                 self.movie().is_action_script_3(),
             );
         } else {
+            self.0.wake_orphan();
             self.0.current_frame.set(clamped_frame);
         }
 
@@ -2166,6 +2173,7 @@ impl<'gc> MovieClip<'gc> {
     ) {
         let current_frame = self.current_frame();
 
+        self.0.wake_orphan();
         let write = unlock!(Gc::write(context.gc(), self.0), MovieClipData, cell);
         let mut frame_scripts = RefMut::map(write.borrow_mut(), |r| &mut r.frame_scripts);
 
@@ -2221,6 +2229,7 @@ impl<'gc> MovieClip<'gc> {
             //
             // We also have to reset the frame number as this emits AS3 events.
             let to_frame = self.current_frame();
+            self.0.wake_orphan();
             self.0.current_frame.set(from_frame);
 
             let child = self.child_by_depth(depth);
@@ -2234,6 +2243,9 @@ impl<'gc> MovieClip<'gc> {
                 removed_frame_scripts.push(child);
             }
 
+            // The removal events ran scripts, and a cleanup among them may have found the clip
+            // idle at `from_frame` (perf-lab/ruffle-patches/0005).
+            self.0.wake_orphan();
             self.0.current_frame.set(to_frame);
         }
         Ok(())
@@ -2764,6 +2776,7 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
     }
 
     fn set_object2(self, context: &mut UpdateContext<'gc>, to: Avm2StageObject<'gc>) {
+        self.0.wake_orphan();
         let write = Gc::write(context.gc(), self.0);
         unlock!(write, MovieClipData, object2).set(Some(to));
         if self.parent().is_none() {
@@ -2866,6 +2879,7 @@ impl<'gc> TDisplayObjectContainer<'gc> for MovieClip<'gc> {
     }
 
     fn raw_container_mut(&self, mc: &Mutation<'gc>) -> RefMut<'_, ChildContainer<'gc>> {
+        self.0.wake_orphan();
         let write = unlock!(Gc::write(mc, self.0), MovieClipData, cell);
         RefMut::map(write.borrow_mut(), |r| &mut r.container)
     }
@@ -3287,6 +3301,9 @@ impl<'gc> MovieClipData<'gc> {
     }
 
     fn set_flag(&self, flag: MovieClipFlags, value: bool) {
+        if value && flag.intersects(MovieClipFlags::PLAYING | MovieClipFlags::LOOP_QUEUED) {
+            self.wake_orphan();
+        }
         let mut flags = self.flags.get();
         flags.set(flag, value);
         self.flags.set(flags);
@@ -3300,12 +3317,19 @@ impl<'gc> MovieClipData<'gc> {
         self.current_frame.get()
     }
 
+    /// perf-lab/ruffle-patches/0005: see `DisplayObjectBase::wake_orphan`.
+    fn wake_orphan(&self) {
+        self.base.base.wake_orphan();
+    }
+
     fn increment_current_frame(&self) {
+        self.wake_orphan();
         let frame = self.current_frame.get();
         self.current_frame.set(frame + 1);
     }
 
     fn decrement_current_frame(&self) {
+        self.wake_orphan();
         let frame = self.current_frame.get();
         self.current_frame.set(frame - 1);
     }
@@ -4441,6 +4465,7 @@ impl<'gc, 'a> MovieClip<'gc> {
             tag_type: QueuedTagAction::Place(version),
             tag_start,
         };
+        self.0.wake_orphan();
         let mut queued_tags = self.0.queued_tags.borrow_mut();
         let bucket = queued_tags
             .entry(place_object.depth as Depth)
@@ -4523,6 +4548,7 @@ impl<'gc, 'a> MovieClip<'gc> {
             tag_type: QueuedTagAction::Remove(version),
             tag_start,
         };
+        self.0.wake_orphan();
         let mut queued_tags = self.0.queued_tags.borrow_mut();
         let bucket = queued_tags
             .entry(remove_object.depth as Depth)

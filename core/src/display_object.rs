@@ -8,6 +8,7 @@ use crate::avm2::{
 };
 use crate::context::{RenderContext, UpdateContext};
 use crate::drawing::Drawing;
+use crate::orphan_manager::OrphanWakeQueue;
 use crate::prelude::*;
 use crate::string::{AvmString, WString};
 use crate::tag_utils::SwfMovie;
@@ -290,6 +291,10 @@ pub struct DisplayObjectBase<'gc> {
 
     meta_data: Lock<Option<Avm2Object<'gc>>>,
 
+    /// The wake-up queue of the player whose `OrphanManager` put this object to sleep
+    /// (perf-lab/ruffle-patches/0005): `wake_orphan` pushes the object into it.
+    orphan_wake_queue: Lock<Option<OrphanWakeQueue<'gc>>>,
+
     /// The blend mode used when rendering this display object.
     /// Values other than the default `BlendMode::Normal` implicitly cause cache-as-bitmap behavior.
     blend_mode: Cell<ExtendedBlendMode>,
@@ -353,6 +358,7 @@ impl Default for DisplayObjectBase<'_> {
             masker: Lock::new(None),
             maskee: Lock::new(None),
             meta_data: Lock::new(None),
+            orphan_wake_queue: Lock::new(None),
             sound_transform: Default::default(),
             blend_mode: Default::default(),
             opaque_background: Default::default(),
@@ -377,6 +383,7 @@ impl<'gc> DisplayObjectBase<'gc> {
 
     /// Reset all properties that would be adjusted by a movie load.
     fn reset_for_movie_load(&self) {
+        self.wake_orphan();
         let flags_to_keep = self.flags.get() & DisplayObjectFlags::LOCK_ROOT;
         self.flags.set(flags_to_keep | DisplayObjectFlags::VISIBLE);
     }
@@ -664,6 +671,7 @@ impl<'gc> DisplayObjectBase<'gc> {
     /// You should almost always use `DisplayObject.set_parent` instead, which
     /// properly handles 'orphan' movie clips
     fn set_parent_ignoring_orphan_list(this: &Write<Self>, parent: Option<DisplayObject<'gc>>) {
+        this.wake_orphan();
         unlock!(this, Self, parent).set(parent)
     }
 
@@ -680,7 +688,50 @@ impl<'gc> DisplayObjectBase<'gc> {
     }
 
     pub fn set_skip_next_enter_frame(&self, skip: bool) {
+        if skip {
+            self.wake_orphan();
+        }
         self.set_flag(DisplayObjectFlags::SKIP_NEXT_ENTER_FRAME, skip);
+    }
+
+    /// Marks this object as an idle orphan that the frame passes skip without looking at it
+    /// (perf-lab/ruffle-patches/0005, set and cleared by `OrphanManager::cleanup_dead_orphans`).
+    pub fn set_orphan_asleep(&self, value: bool) {
+        self.set_flag(DisplayObjectFlags::ORPHAN_ASLEEP, value);
+    }
+
+    /// Gives an orphan that its player's `OrphanManager` puts to sleep the queue in which
+    /// `wake_orphan` hands it back (perf-lab/ruffle-patches/0005). An object never changes
+    /// players, so the queue is only set once.
+    pub(crate) fn set_orphan_wake_queue(
+        this: Gc<'gc, Self>,
+        mc: &Mutation<'gc>,
+        queue: OrphanWakeQueue<'gc>,
+    ) {
+        if this.orphan_wake_queue.get().is_none() {
+            let write = Gc::write(mc, this);
+            unlock!(write, Self, orphan_wake_queue).set(Some(queue));
+        }
+    }
+
+    /// Called by every change that can end the idleness of an orphan: play, loop, goto and frame
+    /// number, queued tags, frame scripts, pending script, children, parent, construction, movie
+    /// replacement, skip of the next enterFrame (perf-lab/ruffle-patches/0005). An asleep orphan
+    /// is handed back to the frame passes from the next object they examine.
+    pub fn wake_orphan(&self) {
+        if self.contains_flag(DisplayObjectFlags::ORPHAN_ASLEEP) {
+            self.set_flag(DisplayObjectFlags::ORPHAN_ASLEEP, false);
+            self.queue_orphan_wake();
+        }
+    }
+
+    /// Hands this object back to the frame passes of its player, if they skip it.
+    fn queue_orphan_wake(&self) {
+        if let Some(queue) = self.orphan_wake_queue.get() {
+            // The base is the first field of every display object (`HasPrefixField`), so its
+            // address is the one `DisplayObjectWeak::as_ptr` gives for the orphan list.
+            queue.borrow_mut().push(self as *const Self as usize);
+        }
     }
 
     fn set_avm1_removed(&self, value: bool) {
@@ -2995,6 +3046,10 @@ bitflags! {
         /// (they need to be instantiated "manually" by
         /// `Sprite.constructChildren`).
         const MANUAL_FRAME_CONSTRUCT  = 1 << 16;
+
+        /// Idle orphan skipped by the frame passes until one of its idleness conditions changes
+        /// (perf-lab/ruffle-patches/0005, see `DisplayObjectBase::wake_orphan`).
+        const ORPHAN_ASLEEP           = 1 << 17;
     }
 }
 

@@ -2941,7 +2941,7 @@ impl PlayerBuilder {
             sockets: Sockets::empty(),
             net_connections: NetConnections::default(),
             local_connections: LocalConnections::empty(),
-            orphan_manager: OrphanManager::default(),
+            orphan_manager: OrphanManager::new(gc_context),
             dynamic_root: DynamicRootSet::new(gc_context),
             post_frame_callbacks: Vec::new(),
         };
