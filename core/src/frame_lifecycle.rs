@@ -13,7 +13,7 @@
 
 use crate::avm2::{Avm2, EventObject};
 use crate::context::UpdateContext;
-use crate::display_object::{DisplayObject, MovieClip, TDisplayObject};
+use crate::display_object::{DisplayObject, MovieClip, TDisplayObject, TDisplayObjectContainer};
 use crate::loader::LoadManager;
 use crate::orphan_manager::OrphanManager;
 use tracing::instrument;
@@ -183,6 +183,38 @@ pub fn run_inner_goto_frame<'gc>(
 /// so a clip woken up by script in between (goto, play, addChild...) is processed normally.
 pub(crate) fn is_idle_orphan(orphan: DisplayObject<'_>) -> bool {
     orphan.as_movie_clip().is_some_and(|mc| mc.is_idle_leaf())
+}
+
+/// Every object of the tree needs nothing from the three frame passes (perf-lab/ruffle-patches/0006):
+/// clips are idle nodes (see `MovieClip::is_idle_node`), and for shapes, morph shapes, static and
+/// dynamic texts and videos the passes only construct a missing AVM2 object; bitmaps have no pass.
+/// Other objects (buttons, loaders) are not handled.
+pub(crate) fn is_idle_tree(obj: DisplayObject<'_>) -> bool {
+    match obj {
+        DisplayObject::MovieClip(mc) => {
+            mc.is_idle_node() && mc.iter_render_list().all(is_idle_tree)
+        }
+        DisplayObject::Bitmap(_) => true,
+        DisplayObject::Graphic(_)
+        | DisplayObject::MorphShape(_)
+        | DisplayObject::Text(_)
+        | DisplayObject::EditText(_)
+        | DisplayObject::Video(_) => {
+            !obj.movie().is_action_script_3() || obj.object2().is_some()
+        }
+        _ => false,
+    }
+}
+
+/// Sets `ORPHAN_ASLEEP` on every object of an idle orphan tree (perf-lab/ruffle-patches/0006), so
+/// that `DisplayObjectBase::wake_orphan` on any of them wakes the root.
+pub(crate) fn set_tree_asleep(obj: DisplayObject<'_>) {
+    obj.base().set_orphan_asleep(true);
+    if let Some(mc) = obj.as_movie_clip() {
+        for child in mc.iter_render_list() {
+            set_tree_asleep(child);
+        }
+    }
 }
 
 /// Broadcast a `enterFrame` event to all `DisplayObject`s.

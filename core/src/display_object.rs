@@ -722,10 +722,24 @@ impl<'gc> DisplayObjectBase<'gc> {
         if self.contains_flag(DisplayObjectFlags::ORPHAN_ASLEEP) {
             self.set_flag(DisplayObjectFlags::ORPHAN_ASLEEP, false);
             self.queue_orphan_wake();
+            // perf-lab/ruffle-patches/0006: every object of an asleep orphan tree carries the
+            // flag, so a change anywhere in the tree wakes it up to its root, which holds the
+            // queue.
+            let mut parent = self.parent();
+            while let Some(p) = parent {
+                let base = p.base();
+                if !base.contains_flag(DisplayObjectFlags::ORPHAN_ASLEEP) {
+                    break;
+                }
+                base.set_flag(DisplayObjectFlags::ORPHAN_ASLEEP, false);
+                base.queue_orphan_wake();
+                parent = base.parent();
+            }
         }
     }
 
-    /// Hands this object back to the frame passes of its player, if they skip it.
+    /// Hands this object back to the frame passes of its player, if it holds their queue: an
+    /// orphan put to sleep, the root of its tree (perf-lab/ruffle-patches/0006).
     fn queue_orphan_wake(&self) {
         if let Some(queue) = self.orphan_wake_queue.get() {
             // The base is the first field of every display object (`HasPrefixField`), so its
