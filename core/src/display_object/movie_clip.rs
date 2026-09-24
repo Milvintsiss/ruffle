@@ -824,6 +824,22 @@ impl<'gc> MovieClip<'gc> {
         self.0.has_pending_script.get()
     }
 
+    /// True when `enter_frame`, `construct_frame` and `run_frame_scripts` would all do nothing
+    /// for this clip right now: no child, stopped, not skipping a frame, no queued tag, AS3
+    /// object already constructed, no loop queued, no frame script pending or due on the
+    /// current frame (perf-lab/ruffle-patches/0004). Re-check it before each frame pass.
+    pub fn is_idle_leaf(self) -> bool {
+        self.0.object2.get().is_some()
+            && !self.0.playing()
+            && !self.0.loop_queued()
+            && !self.has_pending_script()
+            && self.num_children() == 0
+            && !self.base().should_skip_next_enter_frame()
+            && self.0.queued_tags.borrow().is_empty()
+            && !self.has_frame_script(self.0.current_frame.get())
+            && self.movie().is_action_script_3()
+    }
+
     pub fn set_has_pending_script(self, value: bool) {
         self.0.has_pending_script.set(value);
     }
