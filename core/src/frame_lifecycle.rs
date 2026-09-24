@@ -79,20 +79,26 @@ pub fn run_all_phases_avm2(context: &mut UpdateContext<'_>) {
 
     *context.frame_phase = FramePhase::Enter;
     OrphanManager::each_orphan_obj(context, |orphan, context| {
-        orphan.enter_frame(context);
+        if !is_idle_orphan(orphan) {
+            orphan.enter_frame(context);
+        }
     });
     stage.enter_frame(context);
 
     *context.frame_phase = FramePhase::Construct;
     OrphanManager::each_orphan_obj(context, |orphan, context| {
-        orphan.construct_frame(context);
+        if !is_idle_orphan(orphan) {
+            orphan.construct_frame(context);
+        }
     });
     stage.construct_frame(context);
     broadcast_frame_constructed(context);
 
     *context.frame_phase = FramePhase::FrameScripts;
     OrphanManager::each_orphan_obj(context, |orphan, context| {
-        orphan.run_frame_scripts(context);
+        if !is_idle_orphan(orphan) {
+            orphan.run_frame_scripts(context);
+        }
     });
     stage.run_frame_scripts(context);
     run_frame_script_cleanup(context);
@@ -170,6 +176,13 @@ pub fn run_inner_goto_frame<'gc>(
     context.orphan_manager.cleanup_dead_orphans(context.gc());
 
     *context.frame_phase = old_phase;
+}
+
+/// Orphans of animation-heavy content are mostly empty, stopped clips for which the three
+/// frame passes do nothing (perf-lab/ruffle-patches/0004). The check runs before each pass,
+/// so a clip woken up by script in between (goto, play, addChild...) is processed normally.
+fn is_idle_orphan(orphan: DisplayObject<'_>) -> bool {
+    orphan.as_movie_clip().is_some_and(|mc| mc.is_idle_leaf())
 }
 
 /// Broadcast a `enterFrame` event to all `DisplayObject`s.
